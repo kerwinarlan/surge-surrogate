@@ -1,19 +1,22 @@
-"""Generate assets/surge_animation.gif.
+"""Generate assets/surge_animation_map.gif.
 
 Reads the Rammasun (Glenda) 2014 track and the trained surrogate model,
-then animates a 1x2 figure:
+then animates a 1x2 figure over a real geographic basemap:
 
-  Left  - map-like scatter of the storm position approaching Manila Bay
-          (14.58 N, 120.97 E), with a wind-speed-colored trail and a
-          dynamically zooming view that frames the closing gap.
+  Left  - the storm track (EPSG:4326 -> EPSG:3857 Web Mercator) animated
+          across a CartoDB Voyager basemap zoomed to the Philippines /
+          Manila Bay (117-125 deg E, 12-18 deg N). A red star marks the
+          exact location of Manila Bay (14.58 N, 120.97 E).
   Right - line graph of the model-predicted surge residual (m) growing
           as time progresses, peaking near landfall.
 
-The GIF is written to assets/surge_animation.gif.
+The GIF is written to assets/surge_animation_map.gif.
 """
 
 import os
 
+import contextily as ctx
+import geopandas as gpd
 import joblib
 import matplotlib
 import numpy as np
@@ -28,16 +31,28 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TRACK_CSV = os.path.join(ROOT, "data", "glenda_track_2014.csv")
 TIDE_CSV = os.path.join(ROOT, "manila_tide_2014.csv")
 MODEL_PATH = os.path.join(ROOT, "models", "surge_model.pkl")
-OUT_GIF = os.path.join(ROOT, "assets", "surge_animation.gif")
+OUT_GIF = os.path.join(ROOT, "assets", "surge_animation_map.gif")
 
 MANILA_LAT, MANILA_LON = 14.58, 120.97
 REFERENCE_PRESSURE_HPA = 1013.25
 EARTH_RADIUS_KM = 6371.0
 
+# Philippines / Manila Bay view in geographic coordinates.
+VIEW_LON = (117.0, 125.0)
+VIEW_LAT = (12.0, 18.0)
+# The storm is inside the view box only from 2014-07-15 ~03:48 to
+# 2014-07-16 ~16:48; trim the animation to the crossing period.
+TRIM_START = pd.Timestamp("2014-07-15 00:00")
+TRIM_END = pd.Timestamp("2014-07-17 00:00")
+
 SMOOTH_MINUTES = 30   # display smoothing of the prediction line
-STRIDE = 4            # sample every 4th 6-minute point -> ~183 frames
+STRIDE = 4            # sample every 4th 6-minute point
 FPS = 12
 DPI = 100
+BASEMAP_ZOOM = 8
+
+CRS_4326 = "EPSG:4326"
+CRS_3857 = "EPSG:3857"
 
 MODEL_FEATURES = [
     "wind_kts",
@@ -45,6 +60,25 @@ MODEL_FEATURES = [
     "distance_to_manila_km",
     "approach_angle_deg",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Coordinate transforms
+# ---------------------------------------------------------------------------
+def to_mercator(lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert EPSG:4326 (lon, lat) coordinates to EPSG:3857 Web Mercator."""
+    gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(lon, lat), crs=CRS_4326)
+    geom = gdf.to_crs(CRS_3857).geometry
+    return geom.x.to_numpy(), geom.y.to_numpy()
+
+
+def view_extent_mercator() -> tuple[float, float, float, float]:
+    """Return (xmin, xmax, ymin, ymax) of the Philippines view in Mercator."""
+    x, y = to_mercator(
+        np.array([VIEW_LON[0], VIEW_LON[1]]),
+        np.array([VIEW_LAT[0], VIEW_LAT[1]]),
+    )
+    return float(x.min()), float(x.max()), float(y.min()), float(y.max())
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +108,7 @@ def bearing_deg(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
 # Data preparation
 # ---------------------------------------------------------------------------
 def load_animation_data() -> dict:
-    """Return storm track + model predictions aligned to tide timestamps."""
+    """Return track (Mercator) + model predictions aligned to tide timestamps."""
     for path in (TRACK_CSV, TIDE_CSV, MODEL_PATH):
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing required file: {path}")
@@ -110,59 +144,97 @@ def load_animation_data() -> dict:
         pd.Series(pred_raw, index=ts)
         .rolling(f"{SMOOTH_MINUTES}min", center=True, min_periods=1)
         .mean()
-        .to_numpy()
     )
 
-    idx = np.arange(0, len(ts), STRIDE)
+    # Convert storm positions to Web Mercator and trim to the crossing window.
+    x, y = to_mercator(lon[valid], lat[valid])
+    trim = (ts >= TRIM_START) & (ts <= TRIM_END)
+    ts_t = ts[trim]
+    x_t, y_t = x[trim], y[trim]
+    wind_t = wind[valid][trim]
+    dist_t = dist[valid][trim]
+    pred_t = pred.to_numpy()[trim]
+
+    idx = np.arange(0, len(ts_t), STRIDE)
+    manila_x, manila_y = to_mercator(
+        np.array([MANILA_LON]), np.array([MANILA_LAT])
+    )
+    track_x, track_y = to_mercator(
+        track["LON"].to_numpy(), track["LAT"].to_numpy()
+    )
+
     return {
-        "time": ts[idx],
-        "lat": lat[valid][idx],
-        "lon": lon[valid][idx],
-        "wind": wind[valid][idx],
-        "dist": dist[valid][idx],
-        "pred": pred[idx],
-        "track_lat": track["LAT"].to_numpy(),
-        "track_lon": track["LON"].to_numpy(),
-        "peak_idx": int(np.argmax(pred[idx])),
+        "time": ts_t[idx],
+        "x": x_t[idx],
+        "y": y_t[idx],
+        "wind": wind_t[idx],
+        "dist": dist_t[idx],
+        "pred": pred_t[idx],
+        "track_x": track_x,
+        "track_y": track_y,
+        "manila_x": float(manila_x[0]),
+        "manila_y": float(manila_y[0]),
+        "peak_idx": int(np.argmax(pred_t[idx])),
     }
 
 
 # ---------------------------------------------------------------------------
 # Figure construction
 # ---------------------------------------------------------------------------
+def add_basemap(ax: plt.Axes) -> None:
+    """Render a CartoDB Voyager basemap, with fallbacks for robustness."""
+    try:
+        ctx.add_basemap(ax, source=ctx.providers.CartoDB.Voyager,
+                        crs=CRS_3857, zoom=BASEMAP_ZOOM)
+        print("Basemap: CartoDB Voyager.")
+        return
+    except Exception as exc:  # noqa: BLE001
+        print(f"CartoDB Voyager basemap failed ({exc}); trying OpenStreetMap.")
+    try:
+        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik,
+                        crs=CRS_3857, zoom=BASEMAP_ZOOM)
+        print("Basemap: OpenStreetMap.")
+        return
+    except Exception as exc:  # noqa: BLE001
+        print(f"OpenStreetMap basemap failed ({exc}); using plain background.")
+        ax.set_facecolor("#cfe6f2")
+
+
 def build_figure(data: dict) -> tuple:
-    """Create the 1x2 figure and static decorations."""
+    """Create the 1x2 figure, basemap, and static decorations."""
     fig, (ax_map, ax_surge) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # ---- Left: map panel --------------------------------------------------
-    ax_map.set_facecolor("#cfe6f2")
-    ax_map.grid(True, linestyle="--", color="white", alpha=0.7, linewidth=0.8)
-    ax_map.set_xlabel("Longitude (°E)")
-    ax_map.set_ylabel("Latitude (°N)")
+    # ---- Left: real-world map panel --------------------------------------
+    xmin, xmax, ymin, ymax = view_extent_mercator()
+    ax_map.set_xlim(xmin, xmax)
+    ax_map.set_ylim(ymin, ymax)
+    add_basemap(ax_map)
+    ax_map.set_axis_off()
+
+    # Red star for Manila Bay's exact location.
     ax_map.scatter(
-        [MANILA_LON], [MANILA_LAT], marker="*", s=260, c="#d62728", edgecolors="k",
-        zorder=6, label="Manila Bay",
+        [data["manila_x"]], [data["manila_y"]], marker="*", s=340,
+        c="#d62728", edgecolors="black", linewidths=0.8, zorder=8,
     )
     ax_map.annotate(
-        "Manila Bay\n(14.58°N, 120.97°E)", xy=(MANILA_LON, MANILA_LAT),
-        xytext=(MANILA_LON + 1.2, MANILA_LAT + 1.6), fontsize=9, color="#8c1d18",
-        arrowprops=dict(arrowstyle="->", color="#8c1d18", lw=1.0),
+        "Manila Bay", xy=(data["manila_x"], data["manila_y"]),
+        xytext=(data["manila_x"] + 45000, data["manila_y"] + 70000),
+        fontsize=10, fontweight="bold", color="#7a120f",
+        arrowprops=dict(arrowstyle="->", color="#7a120f", lw=1.2),
     )
+
     # Full historical track, faint, for context.
-    ax_map.plot(
-        data["track_lon"], data["track_lat"], color="#444444", alpha=0.45,
-        linewidth=1.0, zorder=2,
-    )
-    ax_map.plot([], [], color="#444444", alpha=0.45, linewidth=1.0,
-                label="Full track")
-    # Animated trail (line + wind-colored scatter).
-    (trail_line,) = ax_map.plot([], [], color="#1f77b4", linewidth=2.0, zorder=4)
-    trail_scatter = ax_map.scatter([], [], c=[], cmap="plasma", s=28, zorder=5)
-    (storm_marker,) = ax_map.plot([], [], "o", markersize=13, mfc="#d62728",
-                                  mec="white", mew=1.6, zorder=7)
+    ax_map.plot(data["track_x"], data["track_y"], color="#333333",
+                alpha=0.5, linewidth=1.2, zorder=2)
+
+    # Animated trail (line + wind-colored scatter) and storm marker.
+    (trail_line,) = ax_map.plot([], [], color="#1f77b4", linewidth=2.2, zorder=4)
+    trail_scatter = ax_map.scatter([], [], c=[], cmap="plasma", s=34, zorder=5)
+    (storm_marker,) = ax_map.plot([], [], "o", markersize=14, mfc="#d62728",
+                                  mec="white", mew=1.8, zorder=9)
     dist_text = ax_map.text(0.03, 0.95, "", transform=ax_map.transAxes,
                             va="top", fontsize=10,
-                            bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+                            bbox=dict(boxstyle="round", fc="white", alpha=0.9))
 
     # ---- Right: surge panel ----------------------------------------------
     ax_surge.axhline(0.0, color="#666666", linewidth=0.8, linestyle="--")
@@ -175,14 +247,14 @@ def build_figure(data: dict) -> tuple:
     (peak_marker,) = ax_surge.plot([], [], "*", color="#d62728", markersize=16, zorder=7)
     peak_text = ax_surge.text(0.03, 0.9, "", transform=ax_surge.transAxes,
                               va="top", fontsize=10,
-                              bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+                              bbox=dict(boxstyle="round", fc="white", alpha=0.9))
     ax_surge.set_title("Predicted surge residual (model)", fontsize=11)
 
     fig.suptitle("Typhoon Rammasun (Glenda) - Surge Surrogate Forecast for Manila Bay",
                  fontsize=13, fontweight="bold")
     fig.subplots_adjust(top=0.88, wspace=0.28)
-    return fig, ax_map, ax_surge, trail_line, trail_scatter, storm_marker, \
-        dist_text, surge_line, surge_dot, peak_marker, peak_text
+    return (fig, ax_map, ax_surge, trail_line, trail_scatter, storm_marker,
+            dist_text, surge_line, surge_dot, peak_marker, peak_text)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +264,8 @@ def main() -> None:
     data = load_animation_data()
     n = len(data["time"])
     peak_idx = data["peak_idx"]
+    print(f"Animation window: {data['time'][0]} to {data['time'][-1]} "
+          f"({n} frames).")
 
     (fig, ax_map, ax_surge, trail_line, trail_scatter, storm_marker, dist_text,
      surge_line, surge_dot, peak_marker, peak_text) = build_figure(data)
@@ -206,24 +280,16 @@ def main() -> None:
         t = data["time"][i]
 
         # ---- Left: map ---------------------------------------------------
-        trail_line.set_data(data["lon"][: i + 1], data["lat"][: i + 1])
-        trail_scatter.set_offsets(np.column_stack([data["lon"][: i + 1],
-                                                   data["lat"][: i + 1]]))
+        trail_line.set_data(data["x"][: i + 1], data["y"][: i + 1])
+        trail_scatter.set_offsets(np.column_stack([data["x"][: i + 1],
+                                                   data["y"][: i + 1]]))
         trail_scatter.set_array(data["wind"][: i + 1])
         trail_scatter.set_clim(data["wind"].min(), data["wind"].max())
-        storm_marker.set_data([data["lon"][i]], [data["lat"][i]])
+        storm_marker.set_data([data["x"][i]], [data["y"][i]])
         dist_text.set_text(
             f"Distance to Manila Bay: {data['dist'][i]:.0f} km\n"
             f"Wind: {data['wind'][i]:.0f} kts"
         )
-
-        # Dynamic zoom: frame the storm-to-Manila gap as it closes.
-        half_lon = float(np.interp(data["dist"][i], [0, 1400], [6.0, 22.0]))
-        half_lat = half_lon * 0.55
-        cx = 0.5 * data["lon"][i] + 0.5 * MANILA_LON
-        cy = 0.5 * data["lat"][i] + 0.5 * MANILA_LAT
-        ax_map.set_xlim(cx - half_lon, cx + half_lon)
-        ax_map.set_ylim(cy - half_lat, cy + half_lat)
 
         # ---- Right: surge line ------------------------------------------
         surge_line.set_data(data["time"][: i + 1], data["pred"][: i + 1])
