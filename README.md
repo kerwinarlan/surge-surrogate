@@ -1,6 +1,15 @@
-# SurgeSurrogate
+<div align="center">
 
-**A fast machine-learning surrogate for storm surge forecasting in Manila Bay.**
+# 🌊 SurgeSurrogate
+
+**A fast machine-learning surrogate for storm surge forecasting in Manila Bay**
+
+[![Python](https://img.shields.io/badge/Python%203.9-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![XGBoost](https://img.shields.io/badge/XGBoost-222222?logo=xgboost&logoColor=white)](https://xgboost.ai)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Pydantic](https://img.shields.io/badge/Pydantic-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
+
+</div>
 
 SurgeSurrogate replaces computationally heavy hydrodynamic simulations (such as
 Delft3D, ADCIRC, or FVCOM) with a trained gradient-boosted regression model. A
@@ -18,6 +27,7 @@ Vamco (2020)**.
 
 ## Table of Contents
 
+- [Why it exists: surge forecasts are too slow](#why-it-exists-surge-forecasts-are-too-slow)
 - [Project Overview](#project-overview)
 - [Key Features](#key-features)
 - [How It Works](#how-it-works)
@@ -31,7 +41,7 @@ Vamco (2020)**.
 
 ---
 
-## Project Overview
+## Why it exists: surge forecasts are too slow
 
 Storm surge is one of the deadliest hazards of tropical cyclones. In 2009,
 Typhoon Ketsana (Ondoy) inundated Metro Manila with flooding that displaced
@@ -59,6 +69,12 @@ ensemble, inference cost is negligible. This enables:
 The surrogate does not replace the physics. It replaces the *computation*,
 with the physics encoded through carefully engineered features (see
 [Key Features](#key-features)).
+
+| Problem | Solution | Result |
+|---|---|---|
+| Hydrodynamic sims take minutes to hours per storm | Gradient-boosted surrogate trained on four historical typhoons | Surge forecast in under a millisecond |
+| Astronomical tides mask the storm-driven signal | 25-hour centered rolling mean isolates the surge residual | The model predicts the physically meaningful quantity |
+| Remote data sources can fail mid-pipeline | Resumable IBTrACS downloader + bundled tide fallback | Training never hard-fails on network conditions |
 
 ## Key Features
 
