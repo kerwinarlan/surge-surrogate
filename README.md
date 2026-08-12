@@ -119,28 +119,28 @@ interactive documentation at `/docs` and measured inference time per request.
                  │           NOAA IBTrACS (WP basin)        │
                  │  Ketsana 2009 · Nesat 2011               │
                  │  Rammasun 2014 · Vamco 2020              │
-                 └──────────────────┬───────────────────────┘
-                                    │ 3-hourly track points
-                                    ▼
+                 └─────────────────────┬────────────────────┘
+                                       │ 3-hourly track points
+                                       ▼
                  ┌──────────────────────────────────────────┐
                  │        UHSLC Manila tide gauge (071)     │
                  │  hourly sea level per storm window       │
                  │  (fallback: manila_tide_2014.csv)        │
-                 └──────────────────┬───────────────────────┘
-                                    │
-                                    ▼
+                 └─────────────────────┬────────────────────┘
+                                       │
+                                       ▼
         ┌───────────────────────────────────────────────────────────┐
         │  Target:  surge_residual = water_level − 25h rolling mean │
         │  Features: wind_kts, pressure_deficit_hpa,                │
         │            distance_to_manila_km, approach_angle_deg      │
-        └───────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
+        └──────────────────────────────┬────────────────────────────┘
+                                       │
+                                       ▼
                  ┌──────────────────────────────────────────┐
-                 │   XGBoostRegressor → models/surge_model.pkl │
-                 └──────────────────┬───────────────────────┘
-                                    │ joblib.load()
-                                    ▼
+                 │  XGBoostRegressor → surge_model.pkl      │
+                 └─────────────────────┬────────────────────┘
+                                       │ joblib.load()
+                                       ▼
                  ┌──────────────────────────────────────────┐
                  │  FastAPI  POST /predict  → surge residual │
                  └──────────────────────────────────────────┘
